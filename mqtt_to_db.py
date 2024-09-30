@@ -337,7 +337,7 @@ def handle_message(topic, data):
     session.close()
 
 # Set up the MQTT client
-client = mqtt.Client()
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
 
 # Read MQTT broker details from environment variables
 mqtt_broker = os.environ.get('MQTT_BROKER', 'localhost')
