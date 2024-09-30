@@ -300,7 +300,12 @@ def handle_message(topic, data):
         call_data = data.get('call')
         audio_m4a_base64 = call_data.get('audio_m4a_base64')
         metadata = call_data.get('metadata')
-        call_id = metadata.get('id')
+        talkgroup_id = metadata.get('talkgroup')
+        start_time = metadata.get('start_time')
+        #Get call ID by searching Calls table for matching start time and talkgroup ID
+        call = session.query(Call).filter_by(start_time=start_time, talkgroup_id=talkgroup_id).first()
+        call_id = call.id
+
         audio = session.query(Audio).filter_by(call_id=call_id).first()
         if not audio:
             audio = Audio(call_id=call_id)
