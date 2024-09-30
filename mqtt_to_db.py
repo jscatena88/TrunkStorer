@@ -114,9 +114,8 @@ class Call(Base):
 class Audio(Base):
     __tablename__ = 'audio'
     call_id = Column(String, ForeignKey('calls.id'), primary_key=True)
-    audio_wav = Column(LargeBinary)
     audio_m4a = Column(LargeBinary)
-    metadata = Column(JSON)
+    audio_metadata = Column(JSON)
 
     call = relationship('Call', back_populates='audio')
 
@@ -269,7 +268,6 @@ def handle_message(topic, data):
     elif msg_type == 'audio':
         # Process audio message
         call_data = data.get('call')
-        audio_wav_base64 = call_data.get('audio_wav_base64')
         audio_m4a_base64 = call_data.get('audio_m4a_base64')
         metadata = call_data.get('metadata')
         call_filename = metadata.get('call_filename')
@@ -278,11 +276,9 @@ def handle_message(topic, data):
         audio = session.query(Audio).filter_by(call_id=call_id).first()
         if not audio:
             audio = Audio(call_id=call_id)
-        if audio_wav_base64:
-            audio.audio_wav = base64.b64decode(audio_wav_base64)
         if audio_m4a_base64:
             audio.audio_m4a = base64.b64decode(audio_m4a_base64)
-        audio.metadata = metadata
+        audio.audio_metadata = metadata
         session.add(audio)
         session.commit()
 
