@@ -3,9 +3,10 @@ import json
 import base64
 import paho.mqtt.client as mqtt
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, Boolean, ForeignKey, LargeBinary, JSON, PrimaryKeyConstraint, ForeignKeyConstraint
+    create_engine, Column, Integer, String, Float, Boolean, ForeignKey, LargeBinary, JSON, PrimaryKeyConstraint, ForeignKeyConstraint, DateTime
 )
 from sqlalchemy.orm import relationship, sessionmaker, declarative_base
+from datetime import datetime
 
 # Define the base class for declarative models
 Base = declarative_base()
@@ -25,7 +26,8 @@ class System(Base):
     units = relationship('Unit', back_populates='system')
     talkgroups = relationship('Talkgroup', back_populates='system')
     calls = relationship('Call', back_populates='system')
-    messages = relationship('Message', back_populates='system')
+    messages = relationship('TrunkingMessage', back_populates='system')
+    unit_events = relationship('UnitEvent', back_populates='system')
 
 # Define the Unit model
 class Unit(Base):
@@ -36,6 +38,7 @@ class Unit(Base):
 
     system = relationship('System', back_populates='units')
     calls = relationship('Call', back_populates='unit')
+    events = relationship('UnitEvent', back_populates='unit')
 
 # Define the Talkgroup model
 class Talkgroup(Base):
@@ -50,25 +53,6 @@ class Talkgroup(Base):
 
     system = relationship('System', back_populates='talkgroups')
     calls = relationship('Call', back_populates='talkgroup')
-
-# Define the Recorder model
-class Recorder(Base):
-    __tablename__ = 'recorders'
-    src_num = Column(Integer)
-    rec_num = Column(Integer)
-    type = Column(String)
-    freq = Column(Integer)
-    duration = Column(Float)
-    count = Column(Integer)
-    rec_state = Column(Integer)
-    rec_state_type = Column(String)
-    squelched = Column(Boolean)
-    
-    __table_args__ = (
-        PrimaryKeyConstraint('src_num', 'rec_num'),
-    )
-    
-    calls = relationship('Call', back_populates='recorder')
 
 # Define the Call model
 class Call(Base):
@@ -106,18 +90,10 @@ class Call(Base):
     signal = Column(Integer)
     noise = Column(Integer)
     call_filename = Column(String)
-    
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ['src_num', 'rec_num'],
-            ['recorders.src_num', 'recorders.rec_num']
-        ),
-    )
-    
+
     system = relationship('System', back_populates='calls')
     unit = relationship('Unit', back_populates='calls')
     talkgroup = relationship('Talkgroup', back_populates='calls')
-    recorder = relationship('Recorder', back_populates='calls', foreign_keys=[src_num, rec_num])
     audio = relationship('Audio', back_populates='call', uselist=False)
 
 # Define the Audio model
@@ -129,9 +105,9 @@ class Audio(Base):
 
     call = relationship('Call', back_populates='audio')
 
-# Define the Message model
-class Message(Base):
-    __tablename__ = 'messages'
+# Define the TrunkingMessage model
+class TrunkingMessage(Base):
+    __tablename__ = 'trunking_messages'
     id = Column(Integer, primary_key=True, autoincrement=True)
     sys_num = Column(Integer, ForeignKey('systems.sys_num'))
     trunk_msg = Column(Integer)
@@ -144,6 +120,36 @@ class Message(Base):
     instance_id = Column(String)
 
     system = relationship('System', back_populates='messages')
+
+# Define the UnitEvent model
+class UnitEvent(Base):
+    __tablename__ = 'unit_events'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    unit_id = Column(Integer, ForeignKey('units.unit_id'))
+    sys_num = Column(Integer, ForeignKey('systems.sys_num'))
+    event_type = Column(String)
+    event_data = Column(JSON)
+    timestamp = Column(Integer)
+    instance_id = Column(String)
+
+    unit = relationship('Unit', back_populates='events')
+    system = relationship('System', back_populates='unit_events')
+
+# Define the Config model
+class Config(Base):
+    __tablename__ = 'configs'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    config_data = Column(JSON)
+    timestamp = Column(Integer)
+    instance_id = Column(String)
+
+# Define the SystemsConfig model
+class SystemsConfig(Base):
+    __tablename__ = 'systems_configs'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    systems_data = Column(JSON)
+    timestamp = Column(Integer)
+    instance_id = Column(String)
 
 # Create the database engine and session
 # Read the database URI from environment variable
@@ -177,25 +183,39 @@ def handle_message(topic, data):
     instance_id = data.get('instance_id')
     session = Session()
 
-    if msg_type == 'system':
-        # Process system message
-        system_data = data.get('system')
-        sys_num = system_data.get('sys_num')
-        sys_name = system_data.get('sys_name')
+    if msg_type == 'config':
+        # Process config message
+        config = Config()
+        config.config_data = data.get('config')
+        config.timestamp = timestamp
+        config.instance_id = instance_id
+        session.add(config)
+        session.commit()
 
-        system = session.query(System).filter_by(sys_num=sys_num).first()
-        if not system:
-            system = System(sys_num=sys_num)
+    elif msg_type == 'systems':
+        # Process systems message
+        systems_data = data.get('systems')
+        systems_config = SystemsConfig()
+        systems_config.systems_data = systems_data
+        systems_config.timestamp = timestamp
+        systems_config.instance_id = instance_id
+        session.add(systems_config)
+        session.commit()
 
-        system.sys_name = sys_name
-        system.type = system_data.get('type')
-        system.sysid = system_data.get('sysid')
-        system.wacn = system_data.get('wacn')
-        system.nac = system_data.get('nac')
-        system.rfss = system_data.get('rfss')
-        system.site_id = system_data.get('site_id')
-
-        session.add(system)
+        # Optionally, update the System table
+        for system_data in systems_data:
+            sys_num = system_data.get('sys_num')
+            system = session.query(System).filter_by(sys_num=sys_num).first()
+            if not system:
+                system = System(sys_num=sys_num)
+            system.sys_name = system_data.get('sys_name')
+            system.type = system_data.get('type')
+            system.sysid = system_data.get('sysid')
+            system.wacn = system_data.get('wacn')
+            system.nac = system_data.get('nac')
+            system.rfss = system_data.get('rfss')
+            system.site_id = system_data.get('site_id')
+            session.add(system)
         session.commit()
 
     elif msg_type in ['call_start', 'call_end']:
@@ -282,7 +302,11 @@ def handle_message(topic, data):
         metadata = call_data.get('metadata')
         call_filename = metadata.get('call_filename')
         # Extract call ID from filename or metadata
-        call_id = call_filename.split('-')[0] + '_' + str(metadata.get('start_time'))
+        # Assuming the call ID is stored in metadata['id']
+        call_id = metadata.get('id')
+        if not call_id:
+            # Fallback: generate call_id from call_filename
+            call_id = call_filename.split('-')[0] + '_' + str(metadata.get('start_time'))
         audio = session.query(Audio).filter_by(call_id=call_id).first()
         if not audio:
             audio = Audio(call_id=call_id)
@@ -295,7 +319,7 @@ def handle_message(topic, data):
     elif msg_type == 'message':
         # Process trunking message
         message_data = data.get('message')
-        message = Message()
+        message = TrunkingMessage()
         message.sys_num = message_data.get('sys_num')
         message.trunk_msg = message_data.get('trunk_msg')
         message.trunk_msg_type = message_data.get('trunk_msg_type')
@@ -317,32 +341,55 @@ def handle_message(topic, data):
         session.add(message)
         session.commit()
 
-    # Handle other message types like 'unit' messages
-    elif msg_type in ['join', 'on', 'off', 'data', 'location', 'ackresp']:
-        unit_data = data.get(msg_type)
-        unit_id = unit_data.get('unit')
+    elif msg_type in ['call', 'end', 'on', 'off', 'ackresp', 'join', 'data', 'ans_req', 'location']:
+        # Process unit messages
+        event_data = data.get(msg_type)
+        unit_id = event_data.get('unit')
         unit = session.query(Unit).filter_by(unit_id=unit_id).first()
         if not unit:
             unit = Unit(unit_id=unit_id)
-        unit.unit_alpha_tag = unit_data.get('unit_alpha_tag')
-        unit.sys_num = unit_data.get('sys_num')
+        unit.unit_alpha_tag = event_data.get('unit_alpha_tag')
+        unit.sys_num = event_data.get('sys_num')
         session.add(unit)
         session.commit()
 
+        # Get or create system
+        sys_num = event_data.get('sys_num')
+        system = session.query(System).filter_by(sys_num=sys_num).first()
+        if not system:
+            system = System(sys_num=sys_num, sys_name=event_data.get('sys_name'))
+            session.add(system)
+            session.commit()
+
+        # Create UnitEvent
+        unit_event = UnitEvent()
+        unit_event.unit_id = unit_id
+        unit_event.sys_num = sys_num
+        unit_event.event_type = msg_type
+        unit_event.event_data = event_data
+        unit_event.timestamp = timestamp
+        unit_event.instance_id = instance_id
+        session.add(unit_event)
+        session.commit()
+
         # Handle talkgroup if present
-        talkgroup_id = unit_data.get('talkgroup')
+        talkgroup_id = event_data.get('talkgroup')
         if talkgroup_id is not None:
             talkgroup = session.query(Talkgroup).filter_by(talkgroup_id=talkgroup_id).first()
             if not talkgroup:
                 talkgroup = Talkgroup(talkgroup_id=talkgroup_id)
-            talkgroup.talkgroup_alpha_tag = unit_data.get('talkgroup_alpha_tag')
-            talkgroup.talkgroup_description = unit_data.get('talkgroup_description')
-            talkgroup.talkgroup_group = unit_data.get('talkgroup_group')
-            talkgroup.talkgroup_tag = unit_data.get('talkgroup_tag')
-            talkgroup.talkgroup_patches = unit_data.get('talkgroup_patches')
-            talkgroup.sys_num = unit.sys_num
+            talkgroup.talkgroup_alpha_tag = event_data.get('talkgroup_alpha_tag')
+            talkgroup.talkgroup_description = event_data.get('talkgroup_description')
+            talkgroup.talkgroup_group = event_data.get('talkgroup_group')
+            talkgroup.talkgroup_tag = event_data.get('talkgroup_tag')
+            talkgroup.talkgroup_patches = event_data.get('talkgroup_patches')
+            talkgroup.sys_num = sys_num
             session.add(talkgroup)
             session.commit()
+
+    else:
+        # Ignore other message types
+        pass
 
     session.close()
 
