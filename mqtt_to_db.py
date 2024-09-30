@@ -3,7 +3,7 @@ import json
 import base64
 import paho.mqtt.client as mqtt
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, Boolean, ForeignKey, LargeBinary, JSON
+    create_engine, Column, Integer, String, Float, Boolean, ForeignKey, LargeBinary, JSON, PrimaryKeyConstraint, ForeignKeyConstraint
 )
 from sqlalchemy.orm import relationship, sessionmaker, declarative_base
 
@@ -54,7 +54,6 @@ class Talkgroup(Base):
 # Define the Recorder model
 class Recorder(Base):
     __tablename__ = 'recorders'
-    id = Column(String, primary_key=True)
     src_num = Column(Integer)
     rec_num = Column(Integer)
     type = Column(String)
@@ -64,7 +63,11 @@ class Recorder(Base):
     rec_state = Column(Integer)
     rec_state_type = Column(String)
     squelched = Column(Boolean)
-
+    
+    __table_args__ = (
+        PrimaryKeyConstraint('src_num', 'rec_num'),
+    )
+    
     calls = relationship('Call', back_populates='recorder')
 
 # Define the Call model
@@ -103,11 +106,18 @@ class Call(Base):
     signal = Column(Integer)
     noise = Column(Integer)
     call_filename = Column(String)
-
+    
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['src_num', 'rec_num'],
+            ['recorders.src_num', 'recorders.rec_num']
+        ),
+    )
+    
     system = relationship('System', back_populates='calls')
     unit = relationship('Unit', back_populates='calls')
     talkgroup = relationship('Talkgroup', back_populates='calls')
-    recorder = relationship('Recorder', back_populates='calls')
+    recorder = relationship('Recorder', back_populates='calls', foreign_keys=[src_num, rec_num])
     audio = relationship('Audio', back_populates='call', uselist=False)
 
 # Define the Audio model
