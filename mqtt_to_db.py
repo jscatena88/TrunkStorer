@@ -48,6 +48,9 @@ def on_message(client, userdata, msg):
         # Add topic and timestamp to the message
         message['_topic'] = msg.topic
         message['_received_time'] = time.time()
+        if message.get('type') in ['rates', 'calls_active', 'recorders', 'recorder']:
+            #skip these messages
+            return
         # Determine the collection based on message type
         collection_name = message.get('type', MONGO_COLLECTION_NAME)
         collection = db[collection_name]
