@@ -1,413 +1,94 @@
 import os
 import json
-import base64
+import signal
+import sys
+import time
+import logging
+from pymongo import MongoClient
 import paho.mqtt.client as mqtt
-from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, Boolean, ForeignKey, LargeBinary, JSON, PrimaryKeyConstraint, ForeignKeyConstraint, DateTime
-)
-from sqlalchemy.orm import relationship, sessionmaker, declarative_base
-from datetime import datetime
 
-# Define the base class for declarative models
-Base = declarative_base()
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Define the System model
-class System(Base):
-    __tablename__ = 'systems'
-    sys_num = Column(Integer, primary_key=True)
-    sys_name = Column(String)
-    type = Column(String)
-    sysid = Column(String)
-    wacn = Column(String)
-    nac = Column(String)
-    rfss = Column(Integer)
-    site_id = Column(Integer)
+# Read environment variables
+MQTT_BROKER_HOST = os.environ.get('MQTT_BROKER_HOST', 'localhost')
+MQTT_BROKER_PORT = int(os.environ.get('MQTT_BROKER_PORT', 1883))
+MQTT_USERNAME = os.environ.get('MQTT_USERNAME')
+MQTT_PASSWORD = os.environ.get('MQTT_PASSWORD')
+MQTT_CLIENT_ID = os.environ.get('MQTT_CLIENT_ID', 'mqtt-mongo-client')
+MQTT_TOPICS = os.environ.get('MQTT_TOPICS', '#')  # Subscribe to all topics by default
 
-    units = relationship('Unit', back_populates='system')
-    talkgroups = relationship('Talkgroup', back_populates='system')
-    calls = relationship('Call', back_populates='system')
-    messages = relationship('TrunkingMessage', back_populates='system')
-    unit_events = relationship('UnitEvent', back_populates='system')
+MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://localhost:27017/')
+MONGO_DB_NAME = os.environ.get('MONGO_DB_NAME', 'trunk_recorder')
+MONGO_COLLECTION_NAME = os.environ.get('MONGO_COLLECTION_NAME', 'messages')
 
-# Define the Unit model
-class Unit(Base):
-    __tablename__ = 'units'
-    unit_id = Column(Integer, primary_key=True)
-    unit_alpha_tag = Column(String)
-    sys_num = Column(Integer, ForeignKey('systems.sys_num'))
+# Initialize MongoDB client
+try:
+    mongo_client = MongoClient(MONGO_URI)
+    db = mongo_client[MONGO_DB_NAME]
+    logger.info("Connected to MongoDB")
+except Exception as e:
+    logger.error("Failed to connect to MongoDB: %s", str(e))
+    sys.exit(1)
 
-    system = relationship('System', back_populates='units')
-    calls = relationship('Call', back_populates='unit')
-    events = relationship('UnitEvent', back_populates='unit')
-
-# Define the Talkgroup model
-class Talkgroup(Base):
-    __tablename__ = 'talkgroups'
-    talkgroup_id = Column(Integer, primary_key=True)
-    talkgroup_alpha_tag = Column(String)
-    talkgroup_description = Column(String)
-    talkgroup_group = Column(String)
-    talkgroup_tag = Column(String)
-    talkgroup_patches = Column(String)
-    sys_num = Column(Integer, ForeignKey('systems.sys_num'))
-
-    system = relationship('System', back_populates='talkgroups')
-    calls = relationship('Call', back_populates='talkgroup')
-
-# Define the Call model
-class Call(Base):
-    __tablename__ = 'calls'
-    id = Column(String, primary_key=True)
-    call_num = Column(Integer)
-    sys_num = Column(Integer, ForeignKey('systems.sys_num'))
-    freq = Column(Integer)
-    unit_id = Column(Integer, ForeignKey('units.unit_id'))
-    talkgroup_id = Column(Integer, ForeignKey('talkgroups.talkgroup_id'))
-    elapsed = Column(Float)
-    length = Column(Float)
-    call_state = Column(Integer)
-    call_state_type = Column(String)
-    mon_state = Column(Integer)
-    mon_state_type = Column(String)
-    audio_type = Column(String)
-    phase2_tdma = Column(Boolean)
-    tdma_slot = Column(Integer)
-    analog = Column(Boolean)
-    rec_num = Column(Integer)
-    src_num = Column(Integer)
-    rec_state = Column(Integer)
-    rec_state_type = Column(String)
-    conventional = Column(Boolean)
-    encrypted = Column(Boolean)
-    emergency = Column(Boolean)
-    start_time = Column(Integer)
-    stop_time = Column(Integer)
-    process_call_time = Column(Integer)
-    error_count = Column(Integer)
-    spike_count = Column(Integer)
-    retry_attempt = Column(Integer)
-    freq_error = Column(Integer)
-    signal = Column(Integer)
-    noise = Column(Integer)
-    call_filename = Column(String)
-
-    system = relationship('System', back_populates='calls')
-    unit = relationship('Unit', back_populates='calls')
-    talkgroup = relationship('Talkgroup', back_populates='calls')
-    audio = relationship('Audio', back_populates='call', uselist=False)
-
-# Define the Audio model
-class Audio(Base):
-    __tablename__ = 'audio'
-    call_id = Column(String, ForeignKey('calls.id'), primary_key=True)
-    audio_m4a = Column(LargeBinary)
-    audio_metadata = Column(JSON)
-
-    call = relationship('Call', back_populates='audio')
-
-# Define the TrunkingMessage model
-class TrunkingMessage(Base):
-    __tablename__ = 'trunking_messages'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    sys_num = Column(Integer, ForeignKey('systems.sys_num'))
-    trunk_msg = Column(Integer)
-    trunk_msg_type = Column(String)
-    opcode = Column(String)
-    opcode_type = Column(String)
-    opcode_desc = Column(String)
-    meta = Column(String)
-    timestamp = Column(Integer)
-    instance_id = Column(String)
-
-    system = relationship('System', back_populates='messages')
-
-# Define the UnitEvent model
-class UnitEvent(Base):
-    __tablename__ = 'unit_events'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    unit_id = Column(Integer, ForeignKey('units.unit_id'))
-    sys_num = Column(Integer, ForeignKey('systems.sys_num'))
-    event_type = Column(String)
-    event_data = Column(JSON)
-    timestamp = Column(Integer)
-    instance_id = Column(String)
-
-    unit = relationship('Unit', back_populates='events')
-    system = relationship('System', back_populates='unit_events')
-
-# Define the Config model
-class Config(Base):
-    __tablename__ = 'configs'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    config_data = Column(JSON)
-    timestamp = Column(Integer)
-    instance_id = Column(String)
-
-# Define the SystemsConfig model
-class SystemsConfig(Base):
-    __tablename__ = 'systems_configs'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    systems_data = Column(JSON)
-    timestamp = Column(Integer)
-    instance_id = Column(String)
-
-# Create the database engine and session
-# Read the database URI from environment variable
-database_uri = os.environ.get('DATABASE_URI', 'sqlite:///trunk_recorder.db')
-engine = create_engine(database_uri)
-Base.metadata.create_all(engine)
-Session = sessionmaker(bind=engine)
-
-# MQTT message handler functions
+# MQTT event callbacks
 def on_connect(client, userdata, flags, rc):
-    print("Connected with result code " + str(rc))
-    # Subscribe to all relevant topics
-    client.subscribe([
-        ("topic/#", 0),
-        ("unit_topic/#", 0),
-        ("message_topic/#", 0),
-    ])
+    if rc == 0:
+        logger.info("Connected to MQTT broker")
+        client.subscribe(MQTT_TOPICS)
+        logger.info("Subscribed to topics: %s", MQTT_TOPICS)
+    else:
+        logger.error("Failed to connect to MQTT broker, return code %d", rc)
 
 def on_message(client, userdata, msg):
-    topic = msg.topic
-    payload = msg.payload.decode()
+    logger.debug("Received message on topic %s", msg.topic)
     try:
-        data = json.loads(payload)
-        handle_message(topic, data)
+        message = json.loads(msg.payload.decode('utf-8'))
+        # Add topic and timestamp to the message
+        message['_topic'] = msg.topic
+        message['_received_time'] = time.time()
+        # Determine the collection based on message type
+        collection_name = message.get('type', MONGO_COLLECTION_NAME)
+        collection = db[collection_name]
+        # Insert message into MongoDB
+        collection.insert_one(message)
+        logger.debug("Message inserted into MongoDB collection '%s'", collection_name)
+    except json.JSONDecodeError:
+        logger.error("Failed to decode JSON message from topic %s", msg.topic)
     except Exception as e:
-        print(f"Error processing message on topic {topic}: {e}")
+        logger.error("An error occurred while processing message from topic %s: %s", msg.topic, str(e))
 
-def handle_message(topic, data):
-    msg_type = data.get('type')
-    timestamp = data.get('timestamp')
-    instance_id = data.get('instance_id')
-    session = Session()
-
-    if msg_type == 'config':
-        # Process config message
-        config = Config()
-        config.config_data = data.get('config')
-        config.timestamp = timestamp
-        config.instance_id = instance_id
-        session.add(config)
-        session.commit()
-
-    elif msg_type == 'systems':
-        # Process systems message
-        systems_data = data.get('systems')
-        systems_config = SystemsConfig()
-        systems_config.systems_data = systems_data
-        systems_config.timestamp = timestamp
-        systems_config.instance_id = instance_id
-        session.add(systems_config)
-        session.commit()
-
-        # Optionally, update the System table
-        for system_data in systems_data:
-            sys_num = system_data.get('sys_num')
-            system = session.query(System).filter_by(sys_num=sys_num).first()
-            if not system:
-                system = System(sys_num=sys_num)
-            system.sys_name = system_data.get('sys_name')
-            system.type = system_data.get('type')
-            system.sysid = system_data.get('sysid')
-            system.wacn = system_data.get('wacn')
-            system.nac = system_data.get('nac')
-            system.rfss = system_data.get('rfss')
-            system.site_id = system_data.get('site_id')
-            session.add(system)
-        session.commit()
-
-    elif msg_type in ['call_start', 'call_end']:
-        call_data = data.get('call')
-        call_id = call_data.get('id')
-        call = session.query(Call).filter_by(id=call_id).first()
-        if not call:
-            call = Call(id=call_id)
-
-        call.call_num = call_data.get('call_num')
-        call.sys_num = call_data.get('sys_num')
-        call.freq = call_data.get('freq')
-        call.elapsed = call_data.get('elapsed')
-        call.length = call_data.get('length')
-        call.call_state = call_data.get('call_state')
-        call.call_state_type = call_data.get('call_state_type')
-        call.mon_state = call_data.get('mon_state')
-        call.mon_state_type = call_data.get('mon_state_type')
-        call.audio_type = call_data.get('audio_type')
-        call.phase2_tdma = call_data.get('phase2_tdma')
-        call.tdma_slot = call_data.get('tdma_slot')
-        call.analog = call_data.get('analog')
-        call.rec_num = call_data.get('rec_num')
-        call.src_num = call_data.get('src_num')
-        call.rec_state = call_data.get('rec_state')
-        call.rec_state_type = call_data.get('rec_state_type')
-        call.conventional = call_data.get('conventional')
-        call.encrypted = call_data.get('encrypted')
-        call.emergency = call_data.get('emergency')
-        call.start_time = call_data.get('start_time')
-        call.stop_time = call_data.get('stop_time')
-        call.process_call_time = call_data.get('process_call_time')
-        call.error_count = call_data.get('error_count')
-        call.spike_count = call_data.get('spike_count')
-        call.retry_attempt = call_data.get('retry_attempt')
-        call.freq_error = call_data.get('freq_error')
-        call.signal = call_data.get('signal')
-        call.noise = call_data.get('noise')
-        call.call_filename = call_data.get('call_filename')
-
-        # Get or create system
-        system = session.query(System).filter_by(sys_num=call.sys_num).first()
-        if not system:
-            system = System(sys_num=call.sys_num, sys_name=call_data.get('sys_name'))
-            session.add(system)
-            session.commit()
-        call.system = system
-
-        # Get or create unit
-        unit_id = call_data.get('unit')
-        if unit_id is not None:
-            unit = session.query(Unit).filter_by(unit_id=unit_id).first()
-            if not unit:
-                unit = Unit(unit_id=unit_id)
-            unit.unit_alpha_tag = call_data.get('unit_alpha_tag')
-            unit.sys_num = call.sys_num
-            session.add(unit)
-            session.commit()
-            call.unit = unit
-
-        # Get or create talkgroup
-        talkgroup_id = call_data.get('talkgroup')
-        if talkgroup_id is not None:
-            talkgroup = session.query(Talkgroup).filter_by(talkgroup_id=talkgroup_id).first()
-            if not talkgroup:
-                talkgroup = Talkgroup(talkgroup_id=talkgroup_id)
-            talkgroup.talkgroup_alpha_tag = call_data.get('talkgroup_alpha_tag')
-            talkgroup.talkgroup_description = call_data.get('talkgroup_description')
-            talkgroup.talkgroup_group = call_data.get('talkgroup_group')
-            talkgroup.talkgroup_tag = call_data.get('talkgroup_tag')
-            talkgroup.talkgroup_patches = call_data.get('talkgroup_patches')
-            talkgroup.sys_num = call.sys_num
-            session.add(talkgroup)
-            session.commit()
-            call.talkgroup = talkgroup
-
-        session.add(call)
-        session.commit()
-
-    elif msg_type == 'audio':
-        # Process audio message
-        call_data = data.get('call')
-        audio_m4a_base64 = call_data.get('audio_m4a_base64')
-        metadata = call_data.get('metadata')
-        talkgroup_id = metadata.get('talkgroup')
-        start_time = metadata.get('start_time')
-        #Get call ID by searching Calls table for matching start time and talkgroup ID
-        call = session.query(Call).filter_by(start_time=start_time, talkgroup_id=talkgroup_id).first()
-        call_id = call.id
-
-        audio = session.query(Audio).filter_by(call_id=call_id).first()
-        if not audio:
-            audio = Audio(call_id=call_id)
-        if audio_m4a_base64:
-            audio.audio_m4a = base64.b64decode(audio_m4a_base64)
-        audio.audio_metadata = metadata
-        session.add(audio)
-        session.commit()
-
-    elif msg_type == 'message':
-        # Process trunking message
-        message_data = data.get('message')
-        message = TrunkingMessage()
-        message.sys_num = message_data.get('sys_num')
-        message.trunk_msg = message_data.get('trunk_msg')
-        message.trunk_msg_type = message_data.get('trunk_msg_type')
-        message.opcode = message_data.get('opcode')
-        message.opcode_type = message_data.get('opcode_type')
-        message.opcode_desc = message_data.get('opcode_desc')
-        message.meta = message_data.get('meta')
-        message.timestamp = data.get('timestamp')
-        message.instance_id = data.get('instance_id')
-
-        # Get or create system
-        system = session.query(System).filter_by(sys_num=message.sys_num).first()
-        if not system:
-            system = System(sys_num=message.sys_num, sys_name=message_data.get('sys_name'))
-            session.add(system)
-            session.commit()
-        message.system = system
-
-        session.add(message)
-        session.commit()
-
-    elif msg_type in ['call', 'end', 'on', 'off', 'ackresp', 'join', 'data', 'ans_req', 'location']:
-        # Process unit messages
-        event_data = data.get(msg_type)
-        unit_id = event_data.get('unit')
-        unit = session.query(Unit).filter_by(unit_id=unit_id).first()
-        if not unit:
-            unit = Unit(unit_id=unit_id)
-        unit.unit_alpha_tag = event_data.get('unit_alpha_tag')
-        unit.sys_num = event_data.get('sys_num')
-        session.add(unit)
-        session.commit()
-
-        # Get or create system
-        sys_num = event_data.get('sys_num')
-        system = session.query(System).filter_by(sys_num=sys_num).first()
-        if not system:
-            system = System(sys_num=sys_num, sys_name=event_data.get('sys_name'))
-            session.add(system)
-            session.commit()
-
-        # Create UnitEvent
-        unit_event = UnitEvent()
-        unit_event.unit_id = unit_id
-        unit_event.sys_num = sys_num
-        unit_event.event_type = msg_type
-        unit_event.event_data = event_data
-        unit_event.timestamp = timestamp
-        unit_event.instance_id = instance_id
-        session.add(unit_event)
-        session.commit()
-
-        # Handle talkgroup if present
-        talkgroup_id = event_data.get('talkgroup')
-        if talkgroup_id is not None:
-            talkgroup = session.query(Talkgroup).filter_by(talkgroup_id=talkgroup_id).first()
-            if not talkgroup:
-                talkgroup = Talkgroup(talkgroup_id=talkgroup_id)
-            talkgroup.talkgroup_alpha_tag = event_data.get('talkgroup_alpha_tag')
-            talkgroup.talkgroup_description = event_data.get('talkgroup_description')
-            talkgroup.talkgroup_group = event_data.get('talkgroup_group')
-            talkgroup.talkgroup_tag = event_data.get('talkgroup_tag')
-            talkgroup.talkgroup_patches = event_data.get('talkgroup_patches')
-            talkgroup.sys_num = sys_num
-            session.add(talkgroup)
-            session.commit()
-
+def on_disconnect(client, userdata, rc):
+    if rc != 0:
+        logger.warning("Unexpected disconnection from MQTT broker")
     else:
-        # Ignore other message types
-        pass
+        logger.info("Disconnected from MQTT broker")
 
-    session.close()
+def signal_handler(sig, frame):
+    logger.info("Shutting down...")
+    client.disconnect()
+    mongo_client.close()
+    sys.exit(0)
 
-# Set up the MQTT client
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+if __name__ == '__main__':
+    # Handle SIGINT (Ctrl+C)
+    signal.signal(signal.SIGINT, signal_handler)
 
-# Read MQTT broker details from environment variables
-mqtt_broker = os.environ.get('MQTT_BROKER', 'localhost')
-mqtt_port = int(os.environ.get('MQTT_PORT', 1883))
-mqtt_username = os.environ.get('MQTT_USERNAME')
-mqtt_password = os.environ.get('MQTT_PASSWORD')
+    # Initialize MQTT client
+    client = mqtt.Client(MQTT_CLIENT_ID)
+    if MQTT_USERNAME and MQTT_PASSWORD:
+        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+    client.on_connect = on_connect
+    client.on_message = on_message
+    client.on_disconnect = on_disconnect
 
-if mqtt_username and mqtt_password:
-    client.username_pw_set(mqtt_username, mqtt_password)
+    # Connect to MQTT broker
+    try:
+        client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, 60)
+    except Exception as e:
+        logger.error("Failed to connect to MQTT broker: %s", str(e))
+        sys.exit(1)
 
-client.on_connect = on_connect
-client.on_message = on_message
-
-client.connect(mqtt_broker, mqtt_port, 60)
-
-# Start the MQTT client loop
-client.loop_forever()
+    # Start MQTT loop
+    client.loop_forever()
